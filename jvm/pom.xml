@@ -1,0 +1,154 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>dqplatform</groupId>
+  <artifactId>dq-platform-parent</artifactId>
+  <version>0.1.0</version>
+  <packaging>pom</packaging>
+  <name>DQ platform (JVM)</name>
+
+  <modules>
+    <module>dq-client</module>
+    <module>dq-jobs</module>
+  </modules>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <java.release>11</java.release>
+    <scala.binary.version>2.12</scala.binary.version>
+    <!-- Khớp với Spark 3.5.1 (spark-parent_2.12:3.5.1) -->
+    <scala.version>2.12.18</scala.version>
+    <spark.version>3.5.1</spark.version>
+    <jackson.version>2.15.2</jackson.version>
+    <deequ.version>2.0.21-spark-3.5</deequ.version>
+    <scalatest.version>3.2.19</scalatest.version>
+    <!-- Spark trên Java 17+ cần mở các package nội bộ của JDK (giống spark-submit) -->
+    <spark.test.jvm.args>
+      -Xmx2g
+      --add-opens=java.base/java.lang=ALL-UNNAMED
+      --add-opens=java.base/java.lang.invoke=ALL-UNNAMED
+      --add-opens=java.base/java.lang.reflect=ALL-UNNAMED
+      --add-opens=java.base/java.io=ALL-UNNAMED
+      --add-opens=java.base/java.net=ALL-UNNAMED
+      --add-opens=java.base/java.nio=ALL-UNNAMED
+      --add-opens=java.base/java.util=ALL-UNNAMED
+      --add-opens=java.base/java.util.concurrent=ALL-UNNAMED
+      --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED
+      --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+      --add-opens=java.base/sun.nio.cs=ALL-UNNAMED
+      --add-opens=java.base/sun.security.action=ALL-UNNAMED
+      --add-opens=java.base/sun.util.calendar=ALL-UNNAMED
+      -Djdk.reflect.useDirectMethodHandle=false
+    </spark.test.jvm.args>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.scala-lang</groupId>
+        <artifactId>scala-library</artifactId>
+        <version>${scala.version}</version>
+        <scope>provided</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.spark</groupId>
+        <artifactId>spark-sql_${scala.binary.version}</artifactId>
+        <version>${spark.version}</version>
+        <scope>provided</scope>
+      </dependency>
+      <!-- Deequ dùng mllib (KLL, histogram). Spark distribution đã có sẵn -> provided -->
+      <dependency>
+        <groupId>org.apache.spark</groupId>
+        <artifactId>spark-mllib_${scala.binary.version}</artifactId>
+        <version>${spark.version}</version>
+        <scope>provided</scope>
+      </dependency>
+      <!-- Jackson đi kèm Spark 3.5.1; dùng chung bản đó để tránh xung đột classpath -->
+      <dependency>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-databind</artifactId>
+        <version>${jackson.version}</version>
+        <scope>provided</scope>
+      </dependency>
+      <dependency>
+        <groupId>com.amazon.deequ</groupId>
+        <artifactId>deequ</artifactId>
+        <version>${deequ.version}</version>
+        <!-- Deequ khai Spark/Scala/breeze ở scope compile; Spark distribution đã có sẵn.
+             dqdl (+ antlr) chỉ dùng cho EvaluateDataQuality, platform không dùng DQDL. -->
+        <exclusions>
+          <exclusion><groupId>org.apache.spark</groupId><artifactId>*</artifactId></exclusion>
+          <exclusion><groupId>org.scala-lang</groupId><artifactId>*</artifactId></exclusion>
+          <exclusion><groupId>org.scalanlp</groupId><artifactId>*</artifactId></exclusion>
+          <exclusion><groupId>software.amazon.glue</groupId><artifactId>*</artifactId></exclusion>
+        </exclusions>
+      </dependency>
+      <dependency>
+        <groupId>org.scalatest</groupId>
+        <artifactId>scalatest_${scala.binary.version}</artifactId>
+        <version>${scalatest.version}</version>
+        <scope>test</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>net.alchim31.maven</groupId>
+          <artifactId>scala-maven-plugin</artifactId>
+          <version>4.10.0</version>
+          <configuration>
+            <scalaVersion>${scala.version}</scalaVersion>
+            <args>
+              <arg>-release:${java.release}</arg>
+              <arg>-deprecation</arg>
+              <arg>-feature</arg>
+              <arg>-unchecked</arg>
+            </args>
+          </configuration>
+          <executions>
+            <execution>
+              <goals><goal>compile</goal><goal>testCompile</goal></goals>
+            </execution>
+          </executions>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-surefire-plugin</artifactId>
+          <version>3.5.2</version>
+          <!-- Test Scala chạy bằng scalatest-maven-plugin -->
+          <configuration><skipTests>true</skipTests></configuration>
+        </plugin>
+        <plugin>
+          <groupId>org.scalatest</groupId>
+          <artifactId>scalatest-maven-plugin</artifactId>
+          <version>2.2.0</version>
+          <configuration>
+            <reportsDirectory>${project.build.directory}/surefire-reports</reportsDirectory>
+            <junitxml>.</junitxml>
+            <argLine>${spark.test.jvm.args}</argLine>
+            <environmentVariables>
+              <SPARK_LOCAL_IP>127.0.0.1</SPARK_LOCAL_IP>
+            </environmentVariables>
+          </configuration>
+          <executions>
+            <execution>
+              <id>test</id>
+              <goals><goal>test</goal></goals>
+            </execution>
+          </executions>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-shade-plugin</artifactId>
+          <version>3.6.0</version>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+  </build>
+</project>

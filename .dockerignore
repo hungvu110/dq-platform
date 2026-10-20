@@ -1,0 +1,6 @@
+.git
+**/target
+**/__pycache__
+**/.pytest_cache
+**/dq.db
+docs

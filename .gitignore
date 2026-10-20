@@ -1,0 +1,20 @@
+# Build
+target/
+*.class
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.coverage
+
+# Local data / runtime
+dq.db
+*.db
+
+# IDE / tooling
+.metals/
+.bsp/
+.vscode/
+.idea/

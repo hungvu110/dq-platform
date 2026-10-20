@@ -1,0 +1,114 @@
+name: dq-platform
+
+# Demo: Data Quality Service (control plane) + Spark job (data plane) dùng Deequ.
+#   docker compose up -d postgres dq-service
+#   docker compose run --rm spark-gen-data
+#   docker compose run --rm spark-bronze-to-silver         # job Python  -> silver/
+#   docker compose run --rm spark-bronze-to-silver-scala   # job Scala   -> silver_scala/
+
+x-spark-common: &spark-common
+  build:
+    context: .                   # cần jvm/ và suites/ để build dq-platform.jar
+    dockerfile: spark/Dockerfile
+  image: dq-demo/spark-deequ:3.5.1
+  depends_on:
+    dq-service:
+      condition: service_healthy
+  environment:
+    DQ_API_TOKEN: ${DQ_API_TOKEN:-changeme-dev-token}
+  volumes:
+    - ./spark/jobs:/opt/dq/jobs:ro
+    - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+    - lake:/data/lake            # giả lập HDFS/S3: bronze, silver, quarantine
+  networks: [dq]
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: dq
+      POSTGRES_USER: dq
+      POSTGRES_PASSWORD: dq
+    volumes:
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dq -d dq"]
+      interval: 5s
+      retries: 10
+    networks: [dq]
+
+  dq-service:
+    build: ./dq-service
+    image: dq-demo/dq-service:0.1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://dq:dq@postgres:5432/dq
+      # Giá trị mặc định chỉ cho demo local. Môi trường thật: bắt buộc đặt qua secret, service không start nếu rỗng.
+      DQ_API_TOKEN: ${DQ_API_TOKEN:-changeme-dev-token}       # job Spark: đọc suite, gửi run
+      DQ_ADMIN_TOKEN: ${DQ_ADMIN_TOKEN:-changeme-admin-token} # sửa rule (PUT /suites), không cấp cho job
+      SEED_DIR: /app/suites
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}   # Slack/Teams/Telegram webhook, để trống = chỉ log
+    volumes:
+      - ./suites:/app/suites:ro
+    ports: ["8000:8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      retries: 10
+    networks: [dq]
+
+  # Sinh dữ liệu bronze mẫu (có lẫn ~3% bản ghi lỗi)
+  spark-gen-data:
+    <<: *spark-common
+    profiles: [jobs]
+    command: >
+      /opt/spark/bin/spark-submit /opt/dq/jobs/generate_bronze.py
+      --out /data/lake/bronze/transactions --dt ${DT:-2026-10-17} --rows 10000 --bad-ratio ${BAD_RATIO:-0.03}
+
+  # Job Bronze -> Silver có DQ gate (Write-Audit-Publish), bản Python
+  spark-bronze-to-silver:
+    <<: *spark-common
+    profiles: [jobs]
+    command: >
+      /opt/spark/bin/spark-submit
+      --py-files /opt/dq/jobs/dq_client.py
+      --conf spark.dq.service.url=http://dq-service:8000
+      --conf spark.dq.dataset=silver.transactions
+      --conf spark.dq.mode=enforce
+      /opt/dq/jobs/bronze_to_silver.py --dt ${DT:-2026-10-17}
+
+  # Cùng job, bản Scala: cùng Bronze, cùng suite, ghi vào silver_scala/ và quarantine/transactions_scala/
+  spark-bronze-to-silver-scala:
+    <<: *spark-common
+    profiles: [jobs]
+    command: >
+      /opt/spark/bin/spark-submit
+      --class dqplatform.jobs.BronzeToSilverTransactions
+      --conf spark.dq.service.url=http://dq-service:8000
+      --conf spark.dq.dataset=silver.transactions
+      --conf spark.dq.mode=enforce
+      /opt/dq/jars/dq-platform.jar --dt ${DT:-2026-10-17}
+
+  # So kết quả job Python và job Scala với nhau và với baseline (chạy sau khi cả hai job đã chạy)
+  spark-parity-check:
+    <<: *spark-common
+    profiles: [jobs]
+    volumes:
+      - ./spark/jobs:/opt/dq/jobs:ro
+      - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+      - ./scripts:/opt/dq/scripts:ro
+      - lake:/data/lake
+    command: >
+      /opt/spark/bin/spark-submit /opt/dq/scripts/parity_check.py
+      --lake /data/lake --dt ${DT:-2026-10-17} --service-url http://dq-service:8000
+
+volumes:
+  pgdata:
+  lake:
+
+networks:
+  dq:

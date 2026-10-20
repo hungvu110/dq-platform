@@ -1,0 +1,77 @@
+{
+  "dataset": "silver.transactions",
+  "policy": {
+    "max_quarantine_ratio": 0.05,
+    "owner": "team-billing"
+  },
+  "suite": {
+    "format": "dq-rules/v2",
+    "description": "DQ gate 2: Bronze -> Silver cho bảng giao dịch, nhóm theo 6 data quality dimensions",
+    "parameters": {
+      "partition_start": "đầu ngày dt (yyyy-MM-dd 00:00:00), job truyền vào",
+      "partition_end": "đầu ngày dt+1, job truyền vào",
+      "source_row_count": "số giao dịch khác nhau ở Bronze (sau dedup), job tính từ dữ liệu nguồn"
+    },
+    "rules": [
+      {"id": "row_count_min", "dimension": "completeness", "severity": "error",
+       "description": "batch đủ lượng tối thiểu, tránh publish partition rỗng/cụt",
+       "check": {"kind": "size", "assert": {"op": ">=", "value": 1000}}},
+      {"id": "row_count_reconcile", "dimension": "completeness", "severity": "error",
+       "description": "đối soát với Bronze: transform không làm mất hay nhân bản giao dịch",
+       "check": {"kind": "size", "assert": {"op": "==", "value": {"param": "source_row_count"}}}},
+      {"id": "transaction_id_not_null", "dimension": "completeness", "severity": "error", "row_level": true,
+       "check": {"kind": "complete", "column": "transaction_id"}},
+      {"id": "subscriber_id_not_null", "dimension": "completeness", "severity": "error", "row_level": true,
+       "check": {"kind": "complete", "column": "subscriber_id"}},
+      {"id": "msisdn_not_null", "dimension": "completeness", "severity": "error", "row_level": true,
+       "check": {"kind": "complete", "column": "msisdn"}},
+      {"id": "amount_not_null", "dimension": "completeness", "severity": "error", "row_level": true,
+       "description": "null cả khi Bronze có giá trị nhưng cast decimal thất bại",
+       "check": {"kind": "complete", "column": "amount"}},
+      {"id": "status_not_null", "dimension": "completeness", "severity": "error", "row_level": true,
+       "check": {"kind": "complete", "column": "status"}},
+      {"id": "event_time_not_null", "dimension": "completeness", "severity": "error", "row_level": true,
+       "check": {"kind": "complete", "column": "event_time"}},
+      {"id": "province_code_completeness", "dimension": "completeness", "severity": "warn",
+       "check": {"kind": "completeness", "column": "province_code", "assert": {"op": ">=", "value": 0.9}}},
+
+      {"id": "transaction_id_unique", "dimension": "uniqueness", "severity": "error",
+       "description": "khóa kỹ thuật; job đã dedup Kafka replay nên fail = lỗi transform",
+       "check": {"kind": "unique", "columns": ["transaction_id"]}},
+      {"id": "business_duplicate", "dimension": "uniqueness", "severity": "warn",
+       "description": "trùng nghiệp vụ: cùng thuê bao, cùng số tiền, cùng thời điểm nhưng khác transaction_id (nghi trừ tiền 2 lần)",
+       "check": {"kind": "unique", "columns": ["subscriber_id", "msisdn", "amount", "event_time"]}},
+
+      {"id": "schema_exact", "dimension": "validity", "severity": "error",
+       "check": {"kind": "schema_columns", "exact": true,
+                 "columns": ["transaction_id", "subscriber_id", "msisdn", "amount", "status", "province_code", "event_time", "dt"]}},
+      {"id": "amount_type", "dimension": "validity", "severity": "error",
+       "check": {"kind": "schema_type", "column": "amount", "type": "decimal"}},
+      {"id": "event_time_type", "dimension": "validity", "severity": "error",
+       "check": {"kind": "schema_type", "column": "event_time", "type": "timestamp"}},
+      {"id": "msisdn_format", "dimension": "validity", "severity": "error", "row_level": true,
+       "check": {"kind": "pattern", "column": "msisdn", "regex": "^84[0-9]{9}$", "assert": {"op": ">=", "value": 0.97}}},
+      {"id": "amount_range", "dimension": "validity", "severity": "error", "row_level": true,
+       "check": {"kind": "range", "column": "amount", "min": 0, "max": 100000000}},
+      {"id": "status_domain", "dimension": "validity", "severity": "error", "row_level": true,
+       "check": {"kind": "in_set", "column": "status", "values": ["SUCCESS", "FAILED", "REFUNDED"]}},
+
+      {"id": "msisdn_carrier_prefix", "dimension": "accuracy", "severity": "warn",
+       "description": "đúng định dạng chưa đủ: số phải thuộc đầu số di động đang cấp phát thực tế",
+       "check": {"kind": "pattern", "column": "msisdn", "regex": "^84(3|5|7|8|9)[0-9]{8}$", "assert": {"op": ">=", "value": 0.99}}},
+      {"id": "amount_mean", "dimension": "accuracy", "severity": "warn",
+       "description": "giá trị trung bình phải sát thực tế kinh doanh; lệch mạnh = sai đơn vị tiền hoặc lỗi nguồn",
+       "check": {"kind": "mean", "column": "amount", "assert": {"op": "between", "min": 10000, "max": 500000}}},
+
+      {"id": "event_time_in_partition", "dimension": "consistency", "severity": "error", "row_level": true,
+       "description": "event_time phải nhất quán với partition dt chứa nó",
+       "check": {"kind": "sql_predicate", "columns": ["event_time"],
+                 "predicate": "event_time IS NULL OR (event_time >= TIMESTAMP '${partition_start}' AND event_time < TIMESTAMP '${partition_end}')"}},
+
+      {"id": "freshness_end_of_day", "dimension": "timeliness", "severity": "warn",
+       "description": "freshness: đã có giao dịch của giờ cuối ngày, nếu không thì upstream về trễ/batch bị cắt",
+       "check": {"kind": "sql_metric", "assert": {"op": "==", "value": 1},
+                 "sql": "SELECT CAST(max(event_time) >= TIMESTAMP '${partition_end}' - INTERVAL 60 MINUTES AS DOUBLE) FROM ${batch}"}}
+    ]
+  }
+}
